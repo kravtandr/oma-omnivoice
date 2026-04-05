@@ -1,0 +1,34 @@
+# docker compose up --build
+# Нужны драйвер NVIDIA и nvidia-container-toolkit.
+
+services:
+  omnivoice-api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: omnivoice-api:local
+    ports:
+      - "38080:38080"
+    environment:
+      # Локальные веса: смонтируйте папку ниже и поставьте OMNIVOICE_MODEL: /model
+      # Скачать на хост: python3 scripts/download_omnivoice.py  → ../omnivoice-model/
+      # OMNIVOICE_MODEL: k2-fsa/OmniVoice
+      OMNIVOICE_MODEL: /model
+      # Быстрый синтез (меньше шагов диффузии); для качества попробуйте 16–32
+      OMNIVOICE_NUM_STEP: "12"
+      # UI: http://localhost:8080/ → Gradio; API docs: /docs
+      # OMNIVOICE_GRADIO_PATH: /gradio
+      # За reverse proxy: OMNIVOICE_GRADIO_ROOT_PATH=/tts
+      # Раскомментируйте при проблемах с загрузкой с Hugging Face:
+      # HF_ENDPOINT: https://hf-mirror.com
+      # Заранее подгрузить Whisper (больше VRAM, быстрее первый clone без ref_text):
+      OMNIVOICE_PRELOAD_ASR: "true"
+    volumes:
+      - hf_cache:/root/.cache/huggingface
+      # Предзагруженная модель (путь на хосте = соседняя папка с репозиторием):
+      - ./omnivoice-model:/model:ro
+    gpus: all
+    shm_size: "2gb"
+
+volumes:
+  hf_cache:

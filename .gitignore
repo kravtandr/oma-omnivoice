@@ -1,0 +1,62 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg
+*.egg-info/
+.eggs/
+dist/
+build/
+*.manifest
+*.spec
+pip-log.txt
+pip-delete-this-directory.txt
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+.hypothesis/
+.ipynb_checkpoints/
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+env/
+
+# --- Secrets & local env ---
+.env
+.env.*
+!.env.example
+
+# --- Hugging Face (локальный кэш при скачивании в дерево репозитория) ---
+**/.cache/huggingface/
+
+# --- Локальные веса OmniVoice (скачивание: scripts/download_omnivoice.py) ---
+omnivoice-model/
+
+# --- Docker ---
+*.log
+
+# --- IDE & редакторы ---
+.idea/
+*.swp
+*.swo
+*~
+
+# --- OS ---
+.DS_Store
+Thumbs.db
+
+# --- Временные / вывод ---
+*.tmp
+*.temp
+/tmp/
+logs/
+*.wav
