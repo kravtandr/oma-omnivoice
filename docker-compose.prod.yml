@@ -27,7 +27,7 @@ services:
         reservations:
           devices:
             - driver: nvidia
-              device_ids: ["${NVIDIA_VISIBLE_DEVICES:-6}"]
+              device_ids: ["${NVIDIA_VISIBLE_DEVICES:-7}"]
               capabilities: [gpu]
     shm_size: "2gb"
     restart: unless-stopped
