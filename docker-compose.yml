@@ -6,7 +6,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: omnivoice-api:local
+    image: omnivoice-api:latest
     ports:
       - "38080:38080"
     environment:
