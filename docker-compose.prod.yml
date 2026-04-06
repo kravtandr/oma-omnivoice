@@ -7,7 +7,7 @@
 
 services:
   omnivoice-api:
-    image: "${REGISTRY:-localhost:5000}/omnivoice-api:${TAG:-latest}"
+    image: "omnivoice-api:${TAG:-latest}"
     ports:
       - "38080:38080"
     environment:
