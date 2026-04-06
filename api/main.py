@@ -65,6 +65,7 @@ async def lifespan(app: FastAPI):
         "true",
         "yes",
     )
+    asr_model_name = os.environ.get("OMNIVOICE_ASR_MODEL", "openai/whisper-large-v3-turbo")
 
     logger.info("Loading OmniVoice %s on %s (preload_asr=%s)...", _model_id, _device, load_asr)
     _model = OmniVoice.from_pretrained(
@@ -72,6 +73,7 @@ async def lifespan(app: FastAPI):
         device_map=_device,
         dtype=torch.float16,
         load_asr=load_asr,
+        asr_model_name=asr_model_name,
     )
     logger.info(
         "Model ready, sampling_rate=%s, default num_step=%s (OMNIVOICE_NUM_STEP)",

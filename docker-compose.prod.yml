@@ -14,10 +14,14 @@ services:
       OMNIVOICE_MODEL: /model
       OMNIVOICE_NUM_STEP: "12"
       OMNIVOICE_PRELOAD_ASR: "true"
+      OMNIVOICE_ASR_MODEL: /whisper-model
+      HF_DATASETS_OFFLINE: "1"
+      TRANSFORMERS_OFFLINE: "1"
       NVIDIA_VISIBLE_DEVICES: "${NVIDIA_VISIBLE_DEVICES:-7}"
     volumes:
       - hf_cache:/root/.cache/huggingface
       - ./omnivoice-model:/model:ro
+      - ./whisper-model:/whisper-model:ro
     deploy:
       resources:
         reservations:

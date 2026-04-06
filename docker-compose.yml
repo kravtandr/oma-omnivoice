@@ -23,12 +23,16 @@ services:
       # HF_ENDPOINT: https://hf-mirror.com
       # Заранее подгрузить Whisper (больше VRAM, быстрее первый clone без ref_text):
       OMNIVOICE_PRELOAD_ASR: "true"
+      # Локальный путь к Whisper внутри контейнера (для офлайн-окружения):
+      OMNIVOICE_ASR_MODEL: "${OMNIVOICE_ASR_MODEL:-openai/whisper-large-v3-turbo}"
       # По умолчанию доступны все GPU; только GPU 1: NVIDIA_VISIBLE_DEVICES=1 docker compose up --build
-      NVIDIA_VISIBLE_DEVICES: "${NVIDIA_VISIBLE_DEVICES:-7}"
+      NVIDIA_VISIBLE_DEVICES: "${NVIDIA_VISIBLE_DEVICES:-6}"
     volumes:
       - hf_cache:/root/.cache/huggingface
       # Предзагруженная модель (путь на хосте = соседняя папка с репозиторием):
       - ./omnivoice-model:/model:ro
+      # Whisper для офлайн-окружения: python3 scripts/download_whisper.py → ../whisper-model/
+      # - ./whisper-model:/whisper-model:ro
     deploy:
       resources:
         reservations:
