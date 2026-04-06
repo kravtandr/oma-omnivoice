@@ -1,0 +1,32 @@
+# Продакшн: использует готовый образ из локального реестра.
+# Перед запуском — собрать и запушить образ:
+#   docker build -t localhost:5000/omnivoice-api:latest .
+#   docker push localhost:5000/omnivoice-api:latest
+# Запуск:
+#   docker compose -f docker-compose.prod.yml up -d
+
+services:
+  omnivoice-api:
+    image: "${REGISTRY:-localhost:5000}/omnivoice-api:${TAG:-latest}"
+    ports:
+      - "38080:38080"
+    environment:
+      OMNIVOICE_MODEL: /model
+      OMNIVOICE_NUM_STEP: "12"
+      OMNIVOICE_PRELOAD_ASR: "true"
+      NVIDIA_VISIBLE_DEVICES: "${NVIDIA_VISIBLE_DEVICES:-6}"
+    volumes:
+      - hf_cache:/root/.cache/huggingface
+      - ./omnivoice-model:/model:ro
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["${NVIDIA_VISIBLE_DEVICES:-6}"]
+              capabilities: [gpu]
+    shm_size: "2gb"
+    restart: unless-stopped
+
+volumes:
+  hf_cache:
