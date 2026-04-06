@@ -23,11 +23,19 @@ services:
       # HF_ENDPOINT: https://hf-mirror.com
       # Заранее подгрузить Whisper (больше VRAM, быстрее первый clone без ref_text):
       OMNIVOICE_PRELOAD_ASR: "true"
+      # По умолчанию доступны все GPU; только GPU 1: NVIDIA_VISIBLE_DEVICES=1 docker compose up --build
+      NVIDIA_VISIBLE_DEVICES: "${NVIDIA_VISIBLE_DEVICES:-6}"
     volumes:
       - hf_cache:/root/.cache/huggingface
       # Предзагруженная модель (путь на хосте = соседняя папка с репозиторием):
       - ./omnivoice-model:/model:ro
-    gpus: all
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["${NVIDIA_VISIBLE_DEVICES:-6}"]
+              capabilities: [gpu]
     shm_size: "2gb"
 
 volumes:
