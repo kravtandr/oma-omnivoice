@@ -16,8 +16,10 @@ import numpy as np
 import soundfile as sf
 import torch
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
-from fastapi.responses import JSONResponse, RedirectResponse, Response, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
+
+from api.voice_library import VoiceLibrary
 
 logging.basicConfig(
     format="%(asctime)s %(levelname)s [%(filename)s:%(lineno)d] %(message)s",
@@ -32,6 +34,7 @@ _DEFAULT_NUM_STEP = max(4, min(64, int(os.environ.get("OMNIVOICE_NUM_STEP", "12"
 _model = None
 _device: str = "cuda"
 _model_id: str = "k2-fsa/OmniVoice"
+_voice_library: Optional[VoiceLibrary] = None
 
 
 def _best_device() -> str:
@@ -55,7 +58,7 @@ def _str2bool(v: str | bool) -> bool:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global _model, _device, _model_id
+    global _model, _device, _model_id, _voice_library
     from omnivoice import OmniVoice
 
     _model_id = os.environ.get("OMNIVOICE_MODEL", "k2-fsa/OmniVoice")
@@ -66,6 +69,9 @@ async def lifespan(app: FastAPI):
         "yes",
     )
     asr_model_name = os.environ.get("OMNIVOICE_ASR_MODEL", "openai/whisper-large-v3-turbo")
+
+    voices_dir = os.environ.get("OMNIVOICE_VOICES_DIR", "/voices")
+    _voice_library = VoiceLibrary(voices_dir)
 
     logger.info("Loading OmniVoice %s on %s (preload_asr=%s)...", _model_id, _device, load_asr)
     _model = OmniVoice.from_pretrained(
@@ -90,7 +96,7 @@ async def lifespan(app: FastAPI):
         if not gradio_path.startswith("/"):
             gradio_path = "/" + gradio_path
         root_path = os.environ.get("OMNIVOICE_GRADIO_ROOT_PATH") or None
-        demo_blocks = build_demo(_model, _model_id)
+        demo_blocks = build_demo(_model, _model_id, voice_library=_voice_library)
         # default_concurrency_limit=1: не допускаем параллельные generate() на одной GPU (OOM/зависание).
         gr.mount_gradio_app(
             app,
@@ -118,14 +124,24 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="OmniVoice TTS API",
-    version="1.0.0",
+    version="1.1.0",
     lifespan=lifespan,
     description="""
-## Режимы
+## Режимы синтеза
 
 - **Voice Cloning** — загрузите `ref_audio` (WAV и т.д.); опционально `ref_text` (если нет — Whisper расшифрует).
 - **Voice Design** — поле `instruct`, например `female, low pitch, british accent`.
 - **Auto Voice** — без `ref_audio` и без `instruct`.
+- **Preset Voice** — укажите `voice_name` из библиотеки (`/v1/generate/preset`).
+
+## Библиотека голосов
+
+- `GET /v1/voices` — список сохранённых голосов.
+- `POST /v1/voices` — загрузить новый голос (name + audio файл).
+- `DELETE /v1/voices/{name}` — удалить голос.
+- `GET /v1/voices/{name}/audio` — скачать аудио-файл голоса.
+- `POST /v1/generate/preset` — синтез с предустановленным голосом по имени.
+- `POST /v1/generate/stream/preset` — потоковый синтез с предустановленным голосом.
 
 ## Non-verbal и произношение
 
@@ -138,6 +154,64 @@ app = FastAPI(
 Длинный текст, chunking, первый запуск Whisper без `ref_text` могут занять заметно дольше.
 """,
 )
+
+
+_EXAMPLE_TEXT = (
+    "Добро пожаловать! Это тестовый запрос синтеза речи с предустановленным голосом из библиотеки."
+)
+
+# Имена компонент-схем для preset-эндпоинтов (генерируются FastAPI автоматически)
+_PRESET_SCHEMA_NAMES = (
+    "Body_generate_preset_v1_generate_preset_post",
+    "Body_generate_stream_preset_v1_generate_stream_preset_post",
+)
+
+
+def _custom_openapi():
+    """Динамически патчит OpenAPI-схему: добавляет enum голосов и пример текста."""
+    from fastapi.openapi.utils import get_openapi
+
+    schema = get_openapi(
+        title=app.title,
+        version=app.version,
+        description=app.description,
+        routes=app.routes,
+    )
+
+    names = _voice_library.names() if _voice_library is not None else []
+    components = schema.get("components", {}).get("schemas", {})
+
+    # Optional string fields — Swagger по умолчанию шлёт "string"; заменяем на пустую строку
+    _OPTIONAL_STR_FIELDS = ("language", "ref_text", "instruct")
+    # Optional float fields — Swagger шлёт 0; убираем example чтобы поле оставалось пустым
+    _OPTIONAL_FLOAT_FIELDS = ("duration",)
+
+    for schema_name in _PRESET_SCHEMA_NAMES:
+        comp = components.get(schema_name)
+        if comp is None:
+            continue
+        props = comp.get("properties", {})
+        if "voice_name" in props and names:
+            props["voice_name"]["enum"] = names
+            props["voice_name"]["example"] = names[0]
+        if "text" in props:
+            props["text"]["example"] = _EXAMPLE_TEXT
+        for field in _OPTIONAL_STR_FIELDS:
+            if field in props:
+                props[field]["example"] = ""
+        for field in _OPTIONAL_FLOAT_FIELDS:
+            if field in props:
+                # Удаляем default/example чтобы Swagger показывал пустое поле
+                props[field].pop("default", None)
+                props[field].pop("example", None)
+        # Swagger не воспроизводит бинарное аудио — json показывает base64 и подтверждает что всё работает
+        if "response_format" in props:
+            props["response_format"]["example"] = "json"
+
+    return schema
+
+
+app.openapi = _custom_openapi  # type: ignore[method-assign]
 
 
 class GenerateJsonBody(BaseModel):
@@ -163,7 +237,7 @@ class GenerateJsonBody(BaseModel):
     layer_penalty_factor: float = 5.0
     position_temperature: float = 5.0
     class_temperature: float = 0.0
-    response_format: Literal["wav", "json"] = "wav"
+    response_format: Literal["wav", "mp3", "json"] = "wav"
 
 
 @app.get("/", include_in_schema=False)
@@ -194,6 +268,237 @@ def web_app_manifest():
             "display": "browser",
         },
         media_type="application/manifest+json",
+    )
+
+
+# ===========================================================================
+# Voice Library endpoints
+# ===========================================================================
+
+
+@app.get("/v1/voices", tags=["Voice Library"])
+def list_voices():
+    """Список всех голосов в библиотеке."""
+    assert _voice_library is not None
+    return {"voices": _voice_library.list_all()}
+
+
+@app.get("/v1/voices/{name}", tags=["Voice Library"])
+def get_voice(name: str):
+    """Метаданные голоса по имени."""
+    assert _voice_library is not None
+    meta = _voice_library.get(name)
+    if meta is None:
+        raise HTTPException(404, f"Голос {name!r} не найден.")
+    return meta
+
+
+@app.get("/v1/voices/{name}/audio", tags=["Voice Library"])
+def get_voice_audio(name: str):
+    """Скачать аудио-файл голоса."""
+    assert _voice_library is not None
+    path = _voice_library.get_audio_path(name)
+    if path is None:
+        raise HTTPException(404, f"Голос {name!r} не найден или файл отсутствует.")
+    return FileResponse(path, media_type="audio/wav", filename=f"{name}.wav")
+
+
+@app.post("/v1/voices", tags=["Voice Library"], status_code=201)
+async def add_voice(
+    name: Annotated[str, Form(..., description="Уникальное имя голоса.")],
+    audio: UploadFile = File(..., description="Аудиофайл референса (WAV, MP3 и др., 3–20 с)."),
+    ref_text: Annotated[Optional[str], Form(description="Транскрипт референса (необязательно).")] = None,
+):
+    """Добавить новый голос в библиотеку."""
+    assert _voice_library is not None
+    try:
+        audio_bytes = await audio.read()
+        if not audio_bytes:
+            raise HTTPException(400, "Файл аудио пустой.")
+        meta = _voice_library.add(name=name, audio_bytes=audio_bytes, ref_text=ref_text)
+        return meta
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("add_voice failed")
+        raise HTTPException(500, str(e)) from e
+
+
+@app.delete("/v1/voices/{name}", tags=["Voice Library"])
+def delete_voice(name: str):
+    """Удалить голос из библиотеки."""
+    assert _voice_library is not None
+    deleted = _voice_library.delete(name)
+    if not deleted:
+        raise HTTPException(404, f"Голос {name!r} не найден.")
+    return {"deleted": name}
+
+
+# ===========================================================================
+# Preset voice generation (voice_name instead of ref_audio upload)
+# ===========================================================================
+
+
+@app.post(
+    "/v1/generate/preset",
+    tags=["Generate"],
+    responses={
+        200: {
+            "content": {
+                "audio/wav": {},
+                "application/json": {},
+            }
+        }
+    },
+)
+async def generate_preset(
+    voice_name: Annotated[str, Form(..., description="Имя голоса из библиотеки (/v1/voices).")],
+    text: Annotated[str, Form(..., description="Текст синтеза.")],
+    language: Annotated[Optional[str], Form()] = None,
+    num_step: Annotated[int, Form()] = _DEFAULT_NUM_STEP,
+    guidance_scale: Annotated[float, Form()] = 2.0,
+    speed: Annotated[float, Form()] = 1.0,
+    duration: Annotated[Optional[float], Form()] = None,
+    t_shift: Annotated[float, Form()] = 0.1,
+    denoise: Annotated[str, Form()] = "true",
+    postprocess_output: Annotated[str, Form()] = "true",
+    layer_penalty_factor: Annotated[float, Form()] = 5.0,
+    position_temperature: Annotated[float, Form()] = 5.0,
+    class_temperature: Annotated[float, Form()] = 0.0,
+    response_format: Annotated[Literal["wav", "mp3", "json"], Form()] = "wav",
+):
+    """Синтез с предустановленным голосом из библиотеки (по имени, без загрузки файла)."""
+    assert _voice_library is not None
+    ref_path = _voice_library.get_audio_path(voice_name)
+    if ref_path is None:
+        raise HTTPException(404, f"Голос {voice_name!r} не найден в библиотеке.")
+    ref_text = _voice_library.get_ref_text(voice_name)
+    language = (language or "").strip() or None
+    duration = duration if duration else None  # Swagger шлёт 0 для пустых float-полей
+    try:
+        d_b = _str2bool(denoise)
+        p_b = _str2bool(postprocess_output)
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+    try:
+        # Создаём VoiceClonePrompt в отдельном потоке (как Gradio), затем генерируем
+        voice_prompt = await asyncio.to_thread(
+            _make_voice_clone_prompt, ref_path, ref_text
+        )
+        wav, sr = await asyncio.to_thread(
+            _run_generate_with_prompt,
+            text=text,
+            voice_clone_prompt=voice_prompt,
+            language=language,
+            num_step=num_step,
+            guidance_scale=guidance_scale,
+            speed=speed,
+            duration=duration,
+            t_shift=t_shift,
+            denoise=d_b,
+            postprocess_output=p_b,
+            layer_penalty_factor=layer_penalty_factor,
+            position_temperature=position_temperature,
+            class_temperature=class_temperature,
+        )
+        return _make_audio_response(wav, sr, response_format)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("generate_preset failed")
+        raise HTTPException(500, detail=str(e)) from e
+
+
+@app.post(
+    "/v1/generate/stream/preset",
+    tags=["Generate"],
+    response_class=StreamingResponse,
+    responses={
+        200: {
+            "content": {"audio/wav": {}},
+            "description": "Streaming WAV с предустановленным голосом из библиотеки.",
+        }
+    },
+)
+async def generate_stream_preset(
+    voice_name: Annotated[str, Form(..., description="Имя голоса из библиотеки (/v1/voices).")],
+    text: Annotated[str, Form(..., description="Текст синтеза.")],
+    sentences_per_chunk: Annotated[int, Form(ge=1, le=20)] = 1,
+    language: Annotated[Optional[str], Form()] = None,
+    num_step: Annotated[int, Form()] = _DEFAULT_NUM_STEP,
+    guidance_scale: Annotated[float, Form()] = 2.0,
+    speed: Annotated[float, Form()] = 1.0,
+    duration: Annotated[Optional[float], Form()] = None,
+    t_shift: Annotated[float, Form()] = 0.1,
+    denoise: Annotated[str, Form()] = "true",
+    postprocess_output: Annotated[str, Form()] = "true",
+    layer_penalty_factor: Annotated[float, Form()] = 5.0,
+    position_temperature: Annotated[float, Form()] = 5.0,
+    class_temperature: Annotated[float, Form()] = 0.0,
+):
+    """Потоковый синтез с предустановленным голосом из библиотеки."""
+    assert _voice_library is not None
+    ref_path = _voice_library.get_audio_path(voice_name)
+    if ref_path is None:
+        raise HTTPException(404, f"Голос {voice_name!r} не найден в библиотеке.")
+    ref_text = _voice_library.get_ref_text(voice_name)
+    language = (language or "").strip() or None
+    duration = duration if duration else None  # Swagger шлёт 0 для пустых float-полей
+    try:
+        d_b = _str2bool(denoise)
+        p_b = _str2bool(postprocess_output)
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+
+    chunks = _split_into_sentence_groups(text, sentences_per_chunk)
+    if not chunks:
+        raise HTTPException(400, "Текст пустой или не удалось разбить на предложения.")
+
+    # Создаём VoiceClonePrompt один раз для всех чанков
+    voice_prompt = await asyncio.to_thread(_make_voice_clone_prompt, ref_path, ref_text)
+
+    logger.info(
+        "stream/preset: голос=%r, %d чанков (sentences_per_chunk=%d)",
+        voice_name, len(chunks), sentences_per_chunk,
+    )
+    sample_rate = _model.sampling_rate  # type: ignore[union-attr]
+
+    async def _stream_generator() -> AsyncIterator[bytes]:
+        yield _streaming_wav_header(sample_rate)
+        for i, chunk_text in enumerate(chunks):
+            logger.info("stream/preset: чанк %d/%d: %r", i + 1, len(chunks), chunk_text[:60])
+            try:
+                wav, _ = await asyncio.to_thread(
+                    _run_generate_with_prompt,
+                    text=chunk_text,
+                    voice_clone_prompt=voice_prompt,
+                    language=language,
+                    num_step=num_step,
+                    guidance_scale=guidance_scale,
+                    speed=speed,
+                    duration=duration,
+                    t_shift=t_shift,
+                    denoise=d_b,
+                    postprocess_output=p_b,
+                    layer_penalty_factor=layer_penalty_factor,
+                    position_temperature=position_temperature,
+                    class_temperature=class_temperature,
+                )
+                yield _tensor_to_pcm16(wav)
+            except Exception:
+                logger.exception("stream/preset: ошибка в чанке %d", i + 1)
+
+    return StreamingResponse(
+        _stream_generator(),
+        media_type="audio/wav",
+        headers={
+            "X-Sample-Rate": str(sample_rate),
+            "X-Chunks-Total": str(len(chunks)),
+            "X-Voice-Name": voice_name,
+            "Transfer-Encoding": "chunked",
+        },
     )
 
 
@@ -236,6 +541,48 @@ def _run_generate(
     return audios[0], _model.sampling_rate
 
 
+def _run_generate_with_prompt(
+    *,
+    text: str,
+    voice_clone_prompt,
+    language: Optional[str],
+    num_step: int,
+    guidance_scale: float,
+    speed: float,
+    duration: Optional[float],
+    t_shift: float,
+    denoise: bool,
+    postprocess_output: bool,
+    layer_penalty_factor: float,
+    position_temperature: float,
+    class_temperature: float,
+):
+    """Генерация с заранее созданным VoiceClonePrompt — идентично пути Gradio Voice Library."""
+    assert _model is not None
+    audios = _model.generate(
+        text=text,
+        language=language,
+        voice_clone_prompt=voice_clone_prompt,
+        duration=duration,
+        num_step=num_step,
+        guidance_scale=guidance_scale,
+        speed=speed,
+        t_shift=t_shift,
+        denoise=denoise,
+        postprocess_output=postprocess_output,
+        layer_penalty_factor=layer_penalty_factor,
+        position_temperature=position_temperature,
+        class_temperature=class_temperature,
+    )
+    return audios[0], _model.sampling_rate
+
+
+def _make_voice_clone_prompt(ref_path: str, ref_text: Optional[str]):
+    """Создаёт VoiceClonePrompt из пути к аудиофайлу (вызывать в thread)."""
+    assert _model is not None
+    return _model.create_voice_clone_prompt(ref_audio=ref_path, ref_text=ref_text)
+
+
 def _tensor_to_wav_bytes(waveform: torch.Tensor, sample_rate: int) -> bytes:
     """PCM16 WAV: float16/тихий сигнал после torchaudio.save часто превращался в «немой» файл."""
     w = waveform.detach().cpu().float().contiguous()
@@ -268,6 +615,32 @@ def _tensor_to_wav_bytes(waveform: torch.Tensor, sample_rate: int) -> bytes:
     buf = io.BytesIO()
     sf.write(buf, pcm, sample_rate, format="WAV", subtype="PCM_16")
     return buf.getvalue()
+
+
+def _tensor_to_mp3_bytes(waveform: torch.Tensor, sample_rate: int, bitrate: str = "128k") -> bytes:
+    """Конвертирует тензор в MP3 через pydub + ffmpeg."""
+    from pydub import AudioSegment
+    wav_bytes = _tensor_to_wav_bytes(waveform, sample_rate)
+    seg = AudioSegment.from_wav(io.BytesIO(wav_bytes))
+    buf = io.BytesIO()
+    seg.export(buf, format="mp3", bitrate=bitrate)
+    return buf.getvalue()
+
+
+def _make_audio_response(
+    waveform: torch.Tensor,
+    sample_rate: int,
+    response_format: str,
+) -> Response:
+    """Возвращает Response нужного формата: wav, mp3 или json (base64 WAV)."""
+    if response_format == "mp3":
+        return Response(content=_tensor_to_mp3_bytes(waveform, sample_rate), media_type="audio/mpeg")
+    if response_format == "json":
+        raw_wav = _tensor_to_wav_bytes(waveform, sample_rate)
+        b64 = base64.standard_b64encode(raw_wav).decode("ascii")
+        return JSONResponse({"sample_rate": sample_rate, "audio_wav_base64": b64, "format": "wav"})
+    # default: wav
+    return Response(content=_tensor_to_wav_bytes(waveform, sample_rate), media_type="audio/wav")
 
 
 def _streaming_wav_header(sample_rate: int) -> bytes:
@@ -346,7 +719,7 @@ async def generate_multipart(
     layer_penalty_factor: Annotated[float, Form()] = 5.0,
     position_temperature: Annotated[float, Form()] = 5.0,
     class_temperature: Annotated[float, Form()] = 0.0,
-    response_format: Annotated[Literal["wav", "json"], Form()] = "wav",
+    response_format: Annotated[Literal["wav", "mp3", "json"], Form()] = "wav",
 ):
     """Синтез через multipart: для клонирования прикрепите файл `ref_audio`."""
     tmp_path: Optional[str] = None
@@ -391,21 +764,7 @@ async def generate_multipart(
             class_temperature=class_temperature,
         )
 
-        if response_format == "json":
-            raw_wav = _tensor_to_wav_bytes(wav, sr)
-            b64 = base64.standard_b64encode(raw_wav).decode("ascii")
-            return JSONResponse(
-                {
-                    "sample_rate": sr,
-                    "audio_wav_base64": b64,
-                    "format": "wav",
-                }
-            )
-
-        return Response(
-            content=_tensor_to_wav_bytes(wav, sr),
-            media_type="audio/wav",
-        )
+        return _make_audio_response(wav, sr, response_format)
     except HTTPException:
         raise
     except Exception as e:
@@ -452,19 +811,7 @@ def generate_json(body: GenerateJsonBody):
             class_temperature=body.class_temperature,
         )
 
-        if body.response_format == "json":
-            raw_wav = _tensor_to_wav_bytes(wav, sr)
-            b64 = base64.standard_b64encode(raw_wav).decode("ascii")
-            return {
-                "sample_rate": sr,
-                "audio_wav_base64": b64,
-                "format": "wav",
-            }
-
-        return Response(
-            content=_tensor_to_wav_bytes(wav, sr),
-            media_type="audio/wav",
-        )
+        return _make_audio_response(wav, sr, body.response_format)
     except Exception as e:
         logger.exception("generate_json failed")
         raise HTTPException(500, detail=str(e)) from e

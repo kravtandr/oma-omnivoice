@@ -164,6 +164,7 @@ def build_demo(
     model: OmniVoice,
     checkpoint: str,
     generate_fn=None,
+    voice_library=None,
 ) -> gr.Blocks:
 
     sampling_rate = model.sampling_rate
@@ -776,6 +777,193 @@ by Xiaomi Next-gen Kaldi team.
                     ],
                     outputs=[st_audio, st_status],
                 )
+
+            # ==============================================================
+            # Voice Library
+            # ==============================================================
+            with gr.TabItem("Voice Library"):
+                if voice_library is None:
+                    gr.Markdown(
+                        "**Библиотека голосов недоступна.** "
+                        "Запустите сервис через API с переменной `OMNIVOICE_VOICES_DIR`."
+                    )
+                else:
+                    def _vl_table_data():
+                        rows = []
+                        for m in voice_library.list_all():
+                            rows.append([
+                                m["name"],
+                                m.get("ref_text", "") or "",
+                                m.get("added_at", ""),
+                                f"{m.get('size_bytes', 0) // 1024} KB",
+                            ])
+                        return rows or [["—", "—", "—", "—"]]
+
+                    def _vl_names():
+                        return voice_library.names()
+
+                    gr.Markdown("""
+### Библиотека референсных голосов
+
+Загружайте аудио (3–20 с), давайте имя — и используйте голос по имени без повторной загрузки.
+""")
+                    with gr.Row():
+                        # ── Left column: управление библиотекой ──────────────────
+                        with gr.Column(scale=1):
+                            with gr.Accordion("Добавить голос", open=True):
+                                vl_name = gr.Textbox(
+                                    label="Имя голоса",
+                                    placeholder="Например: Диктор Алиса",
+                                )
+                                vl_audio = gr.Audio(
+                                    label="Аудио референса",
+                                    type="filepath",
+                                    elem_classes="compact-audio",
+                                )
+                                vl_ref_text = gr.Textbox(
+                                    label="Транскрипт референса (необязательно)",
+                                    lines=2,
+                                    placeholder="Текст, произнесённый в референсном аудио. "
+                                                "Оставьте пустым — Whisper расшифрует автоматически.",
+                                )
+                                vl_add_btn = gr.Button("Добавить в библиотеку", variant="primary")
+                            vl_add_status = gr.Textbox(label="Статус", lines=2, interactive=False)
+
+                            gr.Markdown("---")
+                            vl_refresh_btn = gr.Button("Обновить список")
+                            vl_table = gr.Dataframe(
+                                headers=["Имя", "Транскрипт", "Добавлен", "Размер"],
+                                value=_vl_table_data(),
+                                interactive=False,
+                                wrap=True,
+                            )
+                            with gr.Row():
+                                vl_del_name = gr.Dropdown(
+                                    label="Удалить голос",
+                                    choices=_vl_names(),
+                                    value=None,
+                                    allow_custom_value=False,
+                                )
+                                vl_del_btn = gr.Button("Удалить", variant="stop")
+                            vl_del_status = gr.Textbox(label="Статус удаления", lines=1, interactive=False)
+
+                        # ── Right column: синтез с голосом из библиотеки ─────────
+                        with gr.Column(scale=1):
+                            gr.Markdown("#### Синтез с голосом из библиотеки")
+                            vl_synth_voice = gr.Dropdown(
+                                label="Голос",
+                                choices=_vl_names(),
+                                value=None,
+                                allow_custom_value=False,
+                                info="Выберите голос из библиотеки.",
+                            )
+                            vl_preview_audio = gr.Audio(
+                                label="Превью голоса",
+                                type="filepath",
+                                interactive=False,
+                                elem_classes="compact-audio",
+                            )
+                            vl_synth_text = gr.Textbox(
+                                label="Текст для синтеза",
+                                lines=4,
+                                placeholder="Введите текст...",
+                            )
+                            vl_synth_lang = _lang_dropdown("Язык (необязательно)")
+                            (
+                                vl_ns, vl_gs, vl_dn, vl_sp, vl_du, vl_pp, vl_po
+                            ) = _gen_settings()
+                            vl_synth_btn = gr.Button("Синтезировать", variant="primary")
+                            vl_synth_audio = gr.Audio(label="Результат", type="numpy")
+                            vl_synth_status = gr.Textbox(label="Статус", lines=2, interactive=False)
+
+                    # ── Callbacks ────────────────────────────────────────────────
+
+                    def _all_updates():
+                        names = _vl_names()
+                        data = _vl_table_data()
+                        return data, gr.update(choices=names, value=None), gr.update(choices=names, value=None)
+
+                    def _vl_add_fn(name, audio_path, ref_text):
+                        if not name or not name.strip():
+                            return ("Введите имя голоса.",) + _all_updates()
+                        if not audio_path:
+                            return ("Загрузите аудио-файл.",) + _all_updates()
+                        try:
+                            with open(audio_path, "rb") as f:
+                                audio_bytes = f.read()
+                            voice_library.add(
+                                name=name.strip(),
+                                audio_bytes=audio_bytes,
+                                ref_text=ref_text or None,
+                            )
+                            return (f"Голос {name.strip()!r} добавлен.",) + _all_updates()
+                        except ValueError as e:
+                            return (f"Ошибка: {e}",) + _all_updates()
+                        except Exception as e:
+                            logging.exception("VoiceLibrary add failed")
+                            return (f"Ошибка: {e}",) + _all_updates()
+
+                    def _vl_delete_fn(name):
+                        if not name:
+                            return ("Выберите голос для удаления.",) + _all_updates()
+                        ok = voice_library.delete(name)
+                        msg = f"Голос {name!r} удалён." if ok else f"Голос {name!r} не найден."
+                        return (msg,) + _all_updates()
+
+                    def _vl_refresh_fn():
+                        return _all_updates()
+
+                    def _vl_preview_fn(voice_name):
+                        if not voice_name:
+                            return None
+                        return voice_library.get_audio_path(voice_name)
+
+                    def _vl_synth_fn(
+                        voice_name, text, lang, ns, gs, dn, sp, du, pp, po,
+                        progress=gr.Progress(),
+                    ):
+                        if not voice_name:
+                            return None, "Выберите голос из библиотеки."
+                        audio_path = voice_library.get_audio_path(voice_name)
+                        if audio_path is None:
+                            return None, f"Голос {voice_name!r} не найден (файл отсутствует)."
+                        ref_text_val = voice_library.get_ref_text(voice_name)
+                        return _gen(
+                            text, lang, audio_path, None,
+                            ns, gs, dn, sp, du, pp, po,
+                            mode="clone",
+                            ref_text=ref_text_val,
+                            progress=progress,
+                        )
+
+                    vl_synth_voice.change(
+                        _vl_preview_fn,
+                        inputs=[vl_synth_voice],
+                        outputs=[vl_preview_audio],
+                    )
+                    vl_add_btn.click(
+                        _vl_add_fn,
+                        inputs=[vl_name, vl_audio, vl_ref_text],
+                        outputs=[vl_add_status, vl_table, vl_del_name, vl_synth_voice],
+                    )
+                    vl_del_btn.click(
+                        _vl_delete_fn,
+                        inputs=[vl_del_name],
+                        outputs=[vl_del_status, vl_table, vl_del_name, vl_synth_voice],
+                    )
+                    vl_refresh_btn.click(
+                        _vl_refresh_fn,
+                        inputs=[],
+                        outputs=[vl_table, vl_del_name, vl_synth_voice],
+                    )
+                    vl_synth_btn.click(
+                        _vl_synth_fn,
+                        inputs=[
+                            vl_synth_voice, vl_synth_text, vl_synth_lang,
+                            vl_ns, vl_gs, vl_dn, vl_sp, vl_du, vl_pp, vl_po,
+                        ],
+                        outputs=[vl_synth_audio, vl_synth_status],
+                    )
 
     return demo
 

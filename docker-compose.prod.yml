@@ -22,6 +22,7 @@ services:
       - hf_cache:/root/.cache/huggingface
       - ./omnivoice-model:/model:ro
       - ./whisper-model:/whisper-model:ro
+      - ./voice_ref:/voices
     deploy:
       resources:
         reservations:
